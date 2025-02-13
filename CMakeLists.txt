@@ -15,7 +15,7 @@ if(WIN32)
 else()
     set(USERHOME $ENV{HOME})
 endif()
-set(sdkVersion 2.1.0)
+set(sdkVersion 1.5.1)
 set(toolchainVersion 13_3_Rel1)
 set(picotoolVersion 2.1.0)
 set(picoVscode ${USERHOME}/.pico-sdk/cmake/pico-vscode.cmake)
@@ -35,7 +35,7 @@ pico_sdk_init()
 
 # Add executable. Default name is the project name, version 0.1
 
-add_executable(monitor_hidratacao_IoT ssd1306.c funcoes_gerais.c monitor_hidratacao_IoT.c )
+add_executable(monitor_hidratacao_IoT ssd1306.c monitor_hidratacao_IoT.c )
 
 pico_set_program_name(monitor_hidratacao_IoT "monitor_hidratacao_IoT")
 pico_set_program_version(monitor_hidratacao_IoT "0.1")
@@ -59,7 +59,11 @@ target_link_libraries(monitor_hidratacao_IoT
         hardware_pwm
         hardware_i2c
         hardware_clocks
+        pico_stdlib
+        pico_cyw43_arch_lwip_threadsafe_background
         )
+
+
 
 pico_add_extra_outputs(monitor_hidratacao_IoT)
 

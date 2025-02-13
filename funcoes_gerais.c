@@ -6,17 +6,27 @@
 #include "pico/stdlib.h"  // Biblioteca padrão do Raspberry Pi Pico
 #include "hardware/i2c.h" // Biblioteca para comunicação I2C no RP2040
 #include "ssd1306.h"      // Biblioteca para controle do display OLED SSD1306
-
+volatile bool button_pressionado = false;
 // PINOS I2C
 #define I2C_PORT i2c1 // Define o barramento I2C a ser utilizado
 #define PINO_SCL 14
 #define PINO_SDA 15
 #define BUZZER_PIN 21
+const int BotaoB = 6;
+const int BotaoA = 5;
+
+int valorAgua = 0; // Variável para armazenar a quantidade de água ingerida
 
 const int LED_B = 12;                    // Pino para controle do LED azul via PWM
 const int LED_R = 13;                    // Pino para controle do LED vermelho via PWM
 const int LED_G = 11;                    // Pino para controle do LED verde via PWM
 const int SW = 22;           // Pino de leitura do botão do joystick
+volatile bool botaoA_pressionado = false;
+volatile bool botaoB_pressionado = false;
+
+
+// Pino de leitura do botão A
+
 
 uint pos_y = 14; // Posição inicial do cursor no eixo Y
 // Configura a interrupção para o botão
@@ -35,9 +45,6 @@ ssd1306_t display; // inicializa o objeto do display OLED
 
 
 /********************* */
-volatile bool button_pressionado = false;
-
-
 void button_callback(uint gpio, uint32_t events) {
     static uint64_t last_press_time = 0;
     uint64_t current_time = time_us_64();
@@ -50,6 +57,26 @@ void button_callback(uint gpio, uint32_t events) {
         last_press_time = current_time;
     }
 }
+
+
+
+
+
+/********************************** */
+void buttonAB_callback(uint gpio, uint32_t events) {
+    static uint64_t last_press_time = 0;
+    uint64_t current_time = time_us_64();
+    
+    // Debounce de 200ms
+    if ((current_time - last_press_time) < 200000) return;
+
+    if (gpio == BotaoA) {
+        botaoA_pressionado = true;
+    } else if (gpio == BotaoB) {
+        botaoB_pressionado = true;
+    }
+    last_press_time = current_time;
+}
 /*********************** */
 
 
@@ -57,36 +84,6 @@ void button_callback(uint gpio, uint32_t events) {
 
 /*Função para o programa Buzzer pwm1 */
 
-// Notas musicais para a música tema de Star Wars
-const uint star_wars_notes[] = {
-    330, 330, 330, 262, 392, 523, 330, 262,
-    392, 523, 330, 659, 659, 659, 698, 523,
-    415, 349, 330, 262, 392, 523, 330, 262,
-    392, 523, 330, 659, 659, 659, 698, 523,
-    415, 349, 330, 523, 494, 440, 392, 330,
-    659, 784, 659, 523, 494, 440, 392, 330,
-    659, 659, 330, 784, 880, 698, 784, 659,
-    523, 494, 440, 392, 659, 784, 659, 523,
-    494, 440, 392, 330, 659, 523, 659, 262,
-    330, 294, 247, 262, 220, 262, 330, 262,
-    330, 294, 247, 262, 330, 392, 523, 440,
-    349, 330, 659, 784, 659, 523, 494, 440,
-    392, 659, 784, 659, 523, 494, 440, 392
-};
-
-// Duração das notas em milissegundos
-const uint note_duration[] = {
-    500, 500, 500, 350, 150, 300, 500, 350,
-    150, 300, 500, 500, 500, 500, 350, 150,
-    300, 500, 500, 350, 150, 300, 500, 350,
-    150, 300, 650, 500, 150, 300, 500, 350,
-    150, 300, 500, 150, 300, 500, 350, 150,
-    300, 650, 500, 350, 150, 300, 500, 350,
-    150, 300, 500, 500, 500, 500, 350, 150,
-    300, 500, 500, 350, 150, 300, 500, 350,
-    150, 300, 500, 350, 150, 300, 500, 500,
-    350, 150, 300, 500, 500, 350, 150, 300,
-};
 
 // Inicializa o PWM no pino do buzzer
 void pwm_init_buzzer(uint pin) {
@@ -118,32 +115,6 @@ void play_tone(uint pin, uint frequency, uint duration_ms) {
     pwm_set_gpio_level(pin, 0);
     sleep_ms(50);
 }
-
-// Função principal para tocar a música
-void play_star_wars(uint pin) {
-    for (int i = 0; i < sizeof(star_wars_notes) / sizeof(star_wars_notes[0]); i++) {
-        if (button_pressionado) {
-            button_pressionado = false;
-            return;
-        }
-        
-        if (star_wars_notes[i] == 0) {
-            uint64_t start = time_us_64();
-            while ((time_us_64() - start) < note_duration[i] * 1000) {
-                if (button_pressionado) {
-                    button_pressionado = false;
-                    return;
-                }
-                sleep_ms(1);
-            }
-        } else {
-            play_tone(pin, star_wars_notes[i], note_duration[i]);
-        }
-    }
-    button_pressionado = false;
-}
-
-
 
 
 
@@ -206,7 +177,21 @@ void inicializacao(){
     gpio_set_function(LED_R, GPIO_OUT); // Configura o pino do LED vermelho como saida
     gpio_set_function(LED_G, GPIO_OUT); // Configura o pino do LED verde como saida
 
+    // botão A
+    gpio_init(BotaoA); // Inicializa o pino do botão A
+    gpio_set_dir(BotaoA, GPIO_IN); // Configura o pino do botão como entrada
+    gpio_pull_up(BotaoA); // Ativa o pull-up no pino do botão para evitar flutuações
+
+    gpio_init(BotaoB); // Inicializa o pino do botão B
+    gpio_set_dir(BotaoB, GPIO_IN); // Configura o pino do botão como entrada
+    gpio_pull_up(BotaoB); // Ativa o pull-up no pino do botão para evitar flutuações
+
+
+    // callback para os botoes
     gpio_set_irq_enabled_with_callback(SW, GPIO_IRQ_EDGE_FALL, true, &button_callback);
+    gpio_set_irq_enabled_with_callback(BotaoA, GPIO_IRQ_EDGE_FALL, true, &buttonAB_callback);
+
+    //gpio_set_irq_enabled_with_callback(BotaoA, GPIO_IRQ_EDGE_FALL, true, &button_callback); // callback para o botão A
 }
 
 void print_texto(char *msg, uint pos_x, uint pos_y, uint scale){ //mensagem, posicao x, posicao y, escala
@@ -308,4 +293,40 @@ void pwm_led() {
 
 }
 
+/*
+void addAgua(void) {
+    // Zera as flags para BotaoA e BotaoB e aguarda um tempo para limpar eventos pendentes
+    botaoA_pressionado = false;
+    botaoB_pressionado = false;
+    sleep_ms(300);
 
+    // Habilita as interrupções para BotaoA e BotaoB utilizando a callback buttonAB_callback
+    gpio_set_irq_enabled_with_callback(BotaoA, GPIO_IRQ_EDGE_FALL, true, &buttonAB_callback);
+    gpio_set_irq_enabled(BotaoB, GPIO_IRQ_EDGE_FALL, true);
+
+    // Loop principal: enquanto BotaoB não for pressionado (flag false), processa o BotaoA
+    while (!botaoB_pressionado) {
+        if (botaoA_pressionado) {
+            valorAgua += 300;                    // Incrementa 300ml a cada pressionamento
+            botaoA_pressionado = false;           // Reseta a flag para novo acionamento
+
+            char msg[50];
+            sprintf(msg, "Voce adicionou %d ml", valorAgua);
+            ssd1306_clear(&display);
+            print_texto(msg, 10, 35, 1);
+        }
+        sleep_ms(50); // Delay curto para polling
+    }
+
+    // Desabilita as interrupções para que outros modos não sejam afetados
+    gpio_set_irq_enabled(BotaoA, GPIO_IRQ_EDGE_FALL, false);
+    gpio_set_irq_enabled(BotaoB, GPIO_IRQ_EDGE_FALL, false);
+
+    // Exibe mensagem de retorno ao menu e limpa o display
+    ssd1306_clear(&display);
+    print_texto("Retornando ao menu", 10, 35, 1);
+    sleep_ms(1000);
+    ssd1306_clear(&display);
+    ssd1306_show(&display);
+}
+*/

@@ -279,7 +279,7 @@ void joystick_led_control() {
 void pwm_led() {
     // Configuração inicial
     uint16_t led_b_level = 100;
-    uint slice_led_g;
+    uint slice_led_c;
     setup_pwm_led(LED_B, &slice_led_b, led_b_level);
     
     // Configura interrupção do botão

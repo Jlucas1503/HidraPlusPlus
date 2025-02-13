@@ -23,10 +23,16 @@ extern const int eixoX;
 extern const int eixoY;
 extern const int ADC_CHANNEL_0;
 extern const int ADC_CHANNEL_1;
+extern const int BotaoA;
+extern const int BotaoB;
+extern int valorAgua;
 extern ssd1306_t display;
+extern volatile bool botaoA_pressionado;
+extern volatile bool botaoB_pressionado;
 extern volatile bool button_pressionado;
 
 void button_callback(uint gpio, uint32_t events);
+void buttonAB_callback(uint gpio, uint32_t events);
 void pwm_init_buzzer(uint pin);
 void play_tone(uint pin, uint frequency, uint duration_ms);
 void play_star_wars(uint pin);
@@ -38,5 +44,6 @@ void print_menu(uint posy);
 void joystick_read_axis(uint16_t *vrx_value, uint16_t *vry_value);
 void joystick_led_control();
 void pwm_led();
+void addAgua();
 
 #endif // FUNCOES_GERAIS_H
