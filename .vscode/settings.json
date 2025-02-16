@@ -39,6 +39,8 @@
     "files.associations": {
         "funcoes_gerais.h": "c",
         "ssd1306.h": "c",
-        "i2c.h": "c"
+        "i2c.h": "c",
+        "gpio.h": "c",
+        "stdio.h": "c"
     }
 }

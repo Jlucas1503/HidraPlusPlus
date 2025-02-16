@@ -59,6 +59,7 @@ target_link_libraries(monitor_hidratacao_IoT
         hardware_pwm
         hardware_i2c
         hardware_clocks
+        hardware_timer
         pico_stdlib
         pico_cyw43_arch_lwip_threadsafe_background
         )

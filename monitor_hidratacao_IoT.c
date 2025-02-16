@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include "pico/stdlib.h"
 #include "hardware/gpio.h"
+#include "hardware/timer.h"
 #include "hardware/i2c.h"
 #include "ssd1306.h"
 #include "hardware/adc.h"
@@ -10,6 +11,12 @@
 /*#include "funcoes_gerais.h"*/
 #include "pico/cyw43_arch.h"
 #include "lwip/tcp.h"
+#include "lwip/dns.h"
+#include "lwip/init.h"
+#include "lwip/pbuf.h"
+
+
+/*ETAPA DE VARIAVEIS GLOBAIS*/
 
 // PINOS I2C
 #define I2C_PORT i2c1 // Define o barramento I2C a ser utilizado
@@ -25,9 +32,12 @@ const int SW = 22;           // Pino de leitura do botão do joystick
 volatile bool botaoA_pressionado = false;
 volatile bool botaoB_pressionado = false;
 
+volatile bool connection_established = false;
+
 const int BotaoB = 6;
 const int BotaoA = 5;
 
+int valorAgua = 0; // Variável para armazenar a quantidade de água ingerida
 
 
 uint pos_y = 14; // Posição inicial do cursor no eixo Y
@@ -41,9 +51,21 @@ const int ADC_CHANNEL_1 = 1; // Canal ADC para o eixo Y do joystick
 
 ssd1306_t display; // inicializa o objeto do display OLED
 
+struct tcp_pcb *tcp_client_pcb;
+ip_addr_t server_ip;
+
+
+
 /************* */
+// CONEXAO COM WIFI
+
 #define WIFI_SSID "brisa-1685641"  // Substitua pelo nome da sua rede Wi-Fi
 #define WIFI_PASS "mklxybza" // Substitua pela senha da sua rede Wi-Fi
+#define THINGSPEAK_HOST "api.thingspeak.com"
+#define THINGSPEAK_PORT 80
+#define API_KEY "EY5DTKZKKZO2HF0I" // chave para escrita no Thingspeak
+#define API_KEY_READ "R35Z3BISK9VPH4AD" // cchave para leitura no Thingspeak
+#define CHANNEL_ID "2838418"
 
 // Buffer para respostas HTTP
 #define HTTP_RESPONSE "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n" \
@@ -57,18 +79,7 @@ ssd1306_t display; // inicializa o objeto do display OLED
 /**************************** */
 
 
-/*void buttonB_callback(uint gpio, uint32_t events) {
-    static uint64_t last_press_time = 0;
-    uint64_t current_time = time_us_64();
-    
-    // Debounce de 200ms
-    if ((current_time - last_press_time) < 200000) return;
 
-    if (gpio == BotaoB) {
-        botaoB_pressionado = true;
-    }
-    last_press_time = current_time;
-}*/
 
 
 
@@ -76,69 +87,71 @@ ssd1306_t display; // inicializa o objeto do display OLED
 
 /*FUNÇOES PARA CONEXAO WIFI*/
 
-// Função de callback para processar requisições HTTP
-static err_t http_callback(void *arg, struct tcp_pcb *tpcb, struct pbuf *p, err_t err) {
+static err_t http_recv_callback(void *arg, struct tcp_pcb *tpcb, struct pbuf *p, err_t err) {
     if (p == NULL) {
-        // Cliente fechou a conexão
         tcp_close(tpcb);
         return ERR_OK;
     }
-
-    // Processa a requisição HTTP
-    char *request = (char *)p->payload;
-
-    /*if (strstr(request, "GET /led/on")) {
-        gpio_put(LED_PIN, 1);  // Liga o LED
-    } else if (strstr(request, "GET /led/off")) {
-        gpio_put(LED_PIN, 0);  // Desliga o LED
-    } */
-
-    // Envia a resposta HTTP
-    tcp_write(tpcb, HTTP_RESPONSE, strlen(HTTP_RESPONSE), TCP_WRITE_FLAG_COPY);
-
-    // Libera o buffer recebido
+    printf("Resposta do ThingSpeak: %.*s\n", p->len, (char *)p->payload);
     pbuf_free(p);
-
     return ERR_OK;
 }
 
-// Callback de conexão: associa o http_callback à conexão
-static err_t connection_callback(void *arg, struct tcp_pcb *newpcb, err_t err) {
-    tcp_recv(newpcb, http_callback);  // Associa o callback HTTP
+// Callback quando a conexão TCP é estabelecida
+static err_t http_connected_callback(void *arg, struct tcp_pcb *tpcb, err_t err) {
+    if (err != ERR_OK) {
+        printf("Erro na conexão TCP\n");
+        return err;
+    }
+
+
+    printf("Conectado ao ThingSpeak!\n");
+    connection_established = true;
     return ERR_OK;
 }
 
-// Função de setup do servidor TCP
-static void start_http_server(void) {
-    struct tcp_pcb *pcb = tcp_new();
-    if (!pcb) {
-        printf("Erro ao criar PCB\n");
-        return;
+// Resolver DNS e conectar ao servidor
+static void dns_callback(const char *name, const ip_addr_t *ipaddr, void *callback_arg) {
+    if (ipaddr) {
+        printf("Endereço IP do ThingSpeak: %s\n", ipaddr_ntoa(ipaddr));
+        tcp_client_pcb = tcp_new();
+        tcp_connect(tcp_client_pcb, ipaddr, THINGSPEAK_PORT, http_connected_callback);
+    } else {
+        printf("Falha na resolução de DNS\n");
     }
-
-    // Liga o servidor na porta 80
-    if (tcp_bind(pcb, IP_ADDR_ANY, 80) != ERR_OK) {
-        printf("Erro ao ligar o servidor na porta 80\n");
-        return;
-    }
-
-    pcb = tcp_listen(pcb);  // Coloca o PCB em modo de escuta
-    tcp_accept(pcb, connection_callback);  // Associa o callback de conexão
-
-    printf("Servidor HTTP rodando na porta 80...\n");
 }
 
+
+// Callback específico para leitura do último valor
+static err_t http_read_callback(void *arg, struct tcp_pcb *tpcb, struct pbuf *p, err_t err) {
+    if (p == NULL) {
+        tcp_close(tpcb);
+        return ERR_OK;
+    }
+    
+    // Converte o conteúdo para string
+    char *payload = (char *)p->payload;
+    
+    // Busca o início do corpo da resposta HTTP (após os headers)
+    char *body = strstr(payload, "\r\n\r\n");
+    if (body) {
+        body += 4; // pula o delimitador
+    } else {
+        // Caso não haja headers, usa a resposta inteira
+        body = payload;
+    }
+    
+    // Separa o valor numérico (pode ser que haja espaços ou quebras de linha)
+    int valor = atoi(body);
+    valorAgua = valor;
+    
+    printf("Resposta do ThingSpeak (leitura): %s\n", body);
+    printf("VALOR DA ÁGUA: %d\n", valorAgua);
+    
+    pbuf_free(p);
+    return ERR_OK;
+}
 /******************************/
-
-
-
-
-
-
-
-
-
-
 
 
 /********************* */
@@ -157,44 +170,24 @@ void button_callback(uint gpio, uint32_t events) {
         last_press_time = current_time;
     }
 }
+
+
+int64_t timer_callback(alarm_id_t id, void *user_data) {
+    // Código a ser executado periodicamente
+    printf("Temporizador acionado!\n");
+    
+    // Retorna o tempo, em microsegundos, para a próxima execução do callback.
+    // Retornando 1000000, o callback será acionado a cada 1 segundo.
+    return 1000000;
+}
+
+
+
+
 /*********************** */
 
 
 ///////////////////////////////////////////
-
-/*Função para o programa Buzzer pwm1 */
-
-// Notas musicais para a música tema de Star Wars
-const uint star_wars_notes[] = {
-    330, 330, 330, 262, 392, 523, 330, 262,
-    392, 523, 330, 659, 659, 659, 698, 523,
-    415, 349, 330, 262, 392, 523, 330, 262,
-    392, 523, 330, 659, 659, 659, 698, 523,
-    415, 349, 330, 523, 494, 440, 392, 330,
-    659, 784, 659, 523, 494, 440, 392, 330,
-    659, 659, 330, 784, 880, 698, 784, 659,
-    523, 494, 440, 392, 659, 784, 659, 523,
-    494, 440, 392, 330, 659, 523, 659, 262,
-    330, 294, 247, 262, 220, 262, 330, 262,
-    330, 294, 247, 262, 330, 392, 523, 440,
-    349, 330, 659, 784, 659, 523, 494, 440,
-    392, 659, 784, 659, 523, 494, 440, 392
-};
-
-// Duração das notas em milissegundos
-const uint note_duration[] = {
-    500, 500, 500, 350, 150, 300, 500, 350,
-    150, 300, 500, 500, 500, 500, 350, 150,
-    300, 500, 500, 350, 150, 300, 500, 350,
-    150, 300, 650, 500, 150, 300, 500, 350,
-    150, 300, 500, 150, 300, 500, 350, 150,
-    300, 650, 500, 350, 150, 300, 500, 350,
-    150, 300, 500, 500, 500, 500, 350, 150,
-    300, 500, 500, 350, 150, 300, 500, 350,
-    150, 300, 500, 350, 150, 300, 500, 500,
-    350, 150, 300, 500, 500, 350, 150, 300,
-};
-
 // Inicializa o PWM no pino do buzzer
 void pwm_init_buzzer(uint pin) {
     gpio_set_function(pin, GPIO_FUNC_PWM);
@@ -226,37 +219,11 @@ void play_tone(uint pin, uint frequency, uint duration_ms) {
     sleep_ms(50);
 }
 
-// Função principal para tocar a música
-void play_star_wars(uint pin) {
-    for (int i = 0; i < sizeof(star_wars_notes) / sizeof(star_wars_notes[0]); i++) {
-        if (button_pressionado) {
-            button_pressionado = false;
-            return;
-        }
-        
-        if (star_wars_notes[i] == 0) {
-            uint64_t start = time_us_64();
-            while ((time_us_64() - start) < note_duration[i] * 1000) {
-                if (button_pressionado) {
-                    button_pressionado = false;
-                    return;
-                }
-                sleep_ms(1);
-            }
-        } else {
-            play_tone(pin, star_wars_notes[i], note_duration[i]);
-        }
-    }
-    button_pressionado = false;
-}
-
-
 
 
 
 
 // variaveis para os leds
-//configuração do programa de JOYSTICK_LED ---- PWM
 const float DIVIDER_PWM = 16.0;          // Divisor fracional do clock para o PWM
 const uint16_t PERIOD = 4096;            // Período do PWM (valor máximo do contador)
 uint16_t led_b_level, led_r_level = 100; // Inicialização dos níveis de PWM para os LEDs
@@ -317,6 +284,14 @@ void inicializacao(){
     gpio_init(BotaoA);
     gpio_set_function(BotaoA, GPIO_IN);
     gpio_pull_up(BotaoA);
+    gpio_init(BotaoB);
+    gpio_set_function(BotaoB, GPIO_IN);
+    gpio_pull_up(BotaoB);
+
+
+
+
+
 
     gpio_set_irq_enabled_with_callback(SW, GPIO_IRQ_EDGE_FALL, true, &button_callback);
 }
@@ -333,11 +308,11 @@ void print_retangulo(int x1, int x2, int y1, int y2){
 
 void print_menu(uint posy){
     ssd1306_clear(&display); // Limpa o display
-    print_texto("MENU", 52, 2, 1); // Imprime a palavra "menu" no display
+    print_texto("hidra++", 52, 2, 1); // Imprime a palavra "menu" no display
     print_retangulo(2, posy, 120, 12); // Imprime um retangulo no display
     print_texto("add Agua", 10, 18, 1);
-    print_texto("teste2", 10, 30, 1);
-    print_texto("teste3", 10, 42, 1);
+    print_texto("Atualizar server", 10, 30, 1);
+    print_texto("ler server", 10, 42, 1);
 
 
 }
@@ -355,70 +330,12 @@ void joystick_read_axis(uint16_t *vrx_value, uint16_t *vry_value)
     *vry_value = adc_read();         // Reads the Y-axis value (0-4095)
 }
 
-void joystick_led_control() {
-    // Configuração inicial
-    uint16_t vrx_value, vry_value;
-    setup_pwm_led(LED_B, &slice_led_b, 0);
-    setup_pwm_led(LED_R, &slice_led_r, 0);
-    
-    // Configura interrupção do botão
-    gpio_set_irq_enabled_with_callback(SW, GPIO_IRQ_EDGE_FALL, true, &button_callback);
-
-    printf("Controle LED por Joystick ativado\n");
-    
-    // Loop principal com verificação de interrupção
-    while(!button_pressionado) {
-        joystick_read_axis(&vrx_value, &vry_value);
-        
-        // Mapeia os valores do joystick para PWM
-        pwm_set_gpio_level(LED_B, vrx_value);
-        pwm_set_gpio_level(LED_R, vry_value);
-        
-        // Delay não-bloqueante
-        sleep_ms(50);
-    }
-    
-    // Cleanup ao sair
-    pwm_set_gpio_level(LED_B, 0);
-    pwm_set_gpio_level(LED_R, 0);
-    button_pressionado = false;
-    printf("Retornando ao menu principal\n");
-}
 
 
 
-// funcao para PWM LED -- programa 3
 
-void pwm_led() {
-    // Configuração inicial
-    uint16_t led_b_level = 100;
-    uint slice_led_g;
-    setup_pwm_led(LED_B, &slice_led_b, led_b_level);
-    
-    // Configura interrupção do botão
-    gpio_set_irq_enabled_with_callback(SW, GPIO_IRQ_EDGE_FALL, true, &button_callback);
 
-    printf("Controle PWM do LED ativado\n");
-    
-    // Loop principal com verificação de interrupção
-    while(!button_pressionado) {
-        // Aumenta o brilho do LED verde
-        led_b_level += 100;
-        if (led_b_level > PERIOD) {
-            led_b_level = 0;
-        }
-        pwm_set_gpio_level(LED_B, led_b_level);
-        
-        // Delay não-bloqueante
-        sleep_ms(50);
-    }
-    
-    // Cleanup ao sair
-    pwm_set_gpio_level(LED_B, 0);
-    button_pressionado = false;
-    printf("Retornando ao menu principal\n");
 
-}
 
 
 
@@ -437,30 +354,164 @@ void pwm_led() {
 void addAgua(void) {
     gpio_set_irq_enabled_with_callback(SW, GPIO_IRQ_EDGE_FALL, true, &button_callback);
     
-
-    int valorAgua = 0; // Variável para armazenar a quantidade de água ingerida
-    while(!button_pressionado) {
+    while (!button_pressionado) {
         if (gpio_get(BotaoA) == 0) {
             valorAgua += 300;                    // Incrementa 300ml a cada pressionamento
             char msg[50];
-            sprintf(msg, "Voce adicionou %d ml", valorAgua);
+            sprintf(msg, "Voce adicionou");
+            char msg1[20];
+            sprintf(msg1, "300ml de agua");
+            char msg2[50];
+            sprintf(msg2, "Total: %d", valorAgua);
             ssd1306_clear(&display);
-            print_texto(msg, 10, 35, 1);
-            sleep_ms(1000); // Delay curto para polling
+            print_texto(msg, 10, 25, 1);
+            print_texto(msg1, 10, 40, 1);
+            print_texto(msg2, 10, 55, 1);
+            sleep_ms(1000);
         }
-        
+        else if (gpio_get(BotaoB) == 0) {
+            // Evita que o valor fique negativo
+            if (valorAgua >= 300) {
+                valorAgua -= 300; // Retira 300ml
+            }
+            char msg[50];
+            sprintf(msg, "Voce retirou");
+            char msg1[20];
+            sprintf(msg1, "300ml de agua");
+            char msg2[50];
+            sprintf(msg2, "Total: %d", valorAgua);
+            ssd1306_clear(&display);
+            print_texto(msg, 10, 25, 1);
+            print_texto(msg1, 10, 40, 1);
+            print_texto(msg2, 10, 55, 1);
+            sleep_ms(1000);
+        }
     }
-    // Exibe mensagem de retorno ao menu e limpa o display
+    // Exibe mensagem de retorno ao menu, toca alguns bipes e limpa o display
     ssd1306_clear(&display);
     button_pressionado = false;
     print_texto("Retornando ao menu", 10, 35, 1);
-    sleep_ms(1000);
+    
+    // Toca alguns bipes no buzzer (ex: 2 bipes)
+    for (int i = 0; i < 3; i++) {
+        // Primeiro pisca o LED
+    gpio_put(LED_G, 1);
+    sleep_ms(300);
+    gpio_put(LED_G, 0);
+    sleep_ms(100);
+    
+    // Em seguida toca o buzzer
+    play_tone(BUZZER_PIN, 5000, 100);
+    }
+    
+    sleep_ms(2000);
+    ssd1306_clear(&display);
+    ssd1306_show(&display);
+}
+
+void atualizarServer() { // Requisição GET para mandar ao ThingSpeak
+    // Se não houver conexão ativa, reconecta
+    if(tcp_client_pcb == NULL){
+        connection_established = false;
+        dns_gethostbyname(THINGSPEAK_HOST, &server_ip, dns_callback, NULL);
+
+        // Aguarda a conexão ser estabelecida
+        uint32_t timeout = 0;
+        while(!connection_established && timeout < 5000) { // timeout de 5s
+            sleep_ms(100);
+            timeout += 100;
+        }
+        if(!connection_established) {
+            printf("Conexão não estabelecida.\n");
+            return;
+        }
+    }
+
+    char request[250];
+    snprintf(request, sizeof(request),
+             "GET /update?api_key=%s&field1=%d HTTP/1.1\r\n"
+             "Host: %s\r\n"
+             "Connection: close\r\n"
+             "\r\n",
+             API_KEY, valorAgua, THINGSPEAK_HOST);
+
+    // Envia a requisição via conexão TCP estabelecida
+    tcp_write(tcp_client_pcb, request, strlen(request), TCP_WRITE_FLAG_COPY);
+    printf("tcp_client_pcb: %p\n", tcp_client_pcb);
+    tcp_output(tcp_client_pcb);
+    tcp_recv(tcp_client_pcb, http_recv_callback);
+
+    // Aguarda um tempo para a resposta (ou utilize um flag controlado no callback)
+    sleep_ms(500);
+
+    // Exibe mensagem e fecha a conexão
+    ssd1306_clear(&display);
+    print_texto("Retornando ao menu", 10, 35, 1);
+    sleep_ms(500);  
+
+    tcp_close(tcp_client_pcb);
+    tcp_client_pcb = NULL;
+    for (int i = 0; i < 5; i++) {
+            // Primeiro pisca o LED
+    gpio_put(LED_B, 1);
+    sleep_ms(300);
+    gpio_put(LED_B, 0);
+    sleep_ms(100);
+    
+    // Em seguida toca o buzzer
+    play_tone(BUZZER_PIN, 3000, 100);
+    }
+
+    sleep_ms(1500);
     ssd1306_clear(&display);
     ssd1306_show(&display);
 }
 
 
+void lerServer(void) {
+    // Se não houver conexão ativa, reconecta
+    if (tcp_client_pcb == NULL) {
+        connection_established = false;
+        dns_gethostbyname(THINGSPEAK_HOST, &server_ip, dns_callback, NULL);
+        // Aguarda a conexão ser estabelecida (exemplo com timeout)
+        uint32_t timeout = 0;
+        while (!connection_established && timeout < 5000) {
+            sleep_ms(100);
+            timeout += 100;
+        }
+        if (!connection_established) {
+            printf("Conexão não estabelecida.\n");
+            return;
+        }
+    }
 
+    // Formata a requisição para obter o último valor de água
+    char request[250];
+    snprintf(request, sizeof(request),
+             "GET /channels/%s/fields/1/last.txt?api_key=%s HTTP/1.1\r\n"
+             "Host: %s\r\n"
+             "Connection: close\r\n"
+             "\r\n",
+             CHANNEL_ID, API_KEY_READ, THINGSPEAK_HOST);
+
+    // Envia a requisição e utiliza o callback específico para leitura
+    tcp_write(tcp_client_pcb, request, strlen(request), TCP_WRITE_FLAG_COPY);
+    tcp_output(tcp_client_pcb);
+    tcp_recv(tcp_client_pcb, http_read_callback);
+
+    // Aguarda um tempo para a resposta (ou utilize um flag controlado no callback)
+    sleep_ms(500);
+
+    //fecha a conexão
+     
+
+    tcp_close(tcp_client_pcb);
+    tcp_client_pcb = NULL;
+
+    sleep_ms(1000);
+    ssd1306_clear(&display);
+    ssd1306_show(&display);
+}
 
 
 
@@ -484,7 +535,30 @@ int main(){
     printf("Iniciando...\n");
     //uint16_t vrx_value, vry_value, sw_value; // Variáveis para armazenar os valores do joystick (eixos X e Y) e botão
     inicializacao();
-    
+
+    // Cria um temporizador que aciona a cada 1000ms (1 segundo)
+    add_alarm_in_ms(1000, timer_callback, NULL, true);
+
+
+
+    // Inicialização do meu WIFI
+    if (cyw43_arch_init()) {
+        printf("Falha ao iniciar Wi-Fi\n");
+        return 1;
+    }
+
+    cyw43_arch_enable_sta_mode();
+    printf("Conectando ao Wi-Fi...\n");
+
+    if (cyw43_arch_wifi_connect_blocking(WIFI_SSID, WIFI_PASS, CYW43_AUTH_WPA2_MIXED_PSK)) {
+        printf("Falha ao conectar ao Wi-Fi\n");
+        return 1;
+    }
+    printf("Wi-Fi conectado!\n");
+
+
+    // Resolve o DNS do Thingspeak e conecta
+    dns_gethostbyname(THINGSPEAK_HOST, &server_ip, dns_callback, NULL);
     
 
 
@@ -501,9 +575,6 @@ int main(){
     /******************************************************* */
     // trecho aproveitado do codigo do Joystick.c
     while (true) {
-    gpio_put(LED_B, 0);
-    gpio_put(LED_G, 0);
-    gpio_put(LED_R, 0);
     adc_select_input(0);
     // Lê o valor do ADC para o eixo Y
     uint adc_y_raw = adc_read();
@@ -537,28 +608,47 @@ int main(){
         switch(menu) {
             case 1:
             // limpando o display
+                for(int b = 0; b < 1 ; b++){
                 ssd1306_clear(&display);
-                print_texto("APERTE A ", 20, 18, 1.5);
-                print_texto("PARA ADD 300ml", 20, 30, 1.5);
+                print_texto("APERTE A ", 20, 18, 1);
+                print_texto("PARA ADD 300ml", 20, 30, 1);
+                sleep_ms(1500);
+
+                ssd1306_clear(&display);
+                print_texto("APERTE B ", 20, 18, 1);
+                print_texto("PARA TIRAR 300ml", 20, 30, 1);
+                sleep_ms(1500);
+                }
                 addAgua();
                 break;
             case 2:
                 ssd1306_clear(&display);
-                print_texto("PROGRAMA 2 ", 20, 18, 1.5);
-                print_texto("BUZZER", 20, 30, 1.5);
-                play_star_wars(BUZZER_PIN);
+                print_texto("Mandando ao ", 20, 18, 1.5);
+                print_texto("servidor...", 20, 30, 1.5);
+                print_texto("Aguarde", 20, 42, 1);
+                sleep_ms(5000);
+                atualizarServer();
                 break;
 
             case 3:
                 ssd1306_clear(&display);
-                print_texto("PROGRAMA 3 ", 20, 18, 1.5);
-                print_texto("PWM LED", 20, 30, 1.5);
-                pwm_led();
+                print_texto("Puxando do ", 20, 18, 1.5);
+                print_texto("servidor...", 20, 30, 1.5);
+                print_texto("Aguarde", 20, 42, 1);
+                sleep_ms(5000);
+                lerServer();
+
+                ssd1306_clear(&display);
+
+                char conversao[20];
+                sprintf(conversao, "%d", valorAgua);
+                print_texto("Total ja registrado:", 20, 18, 1);
+                print_texto(conversao, 20, 32, 1);
+                sleep_ms(4000);
+                ssd1306_clear(&display);
+                print_texto("Retornando ao menu", 10, 35, 1);
+                sleep_ms(1000); 
                 break;
-            default:
-                gpio_put(LED_B, 0);
-                gpio_put(LED_G, 0);
-                gpio_put(LED_R, 0);
         }
     }
     sleep_ms(100);
