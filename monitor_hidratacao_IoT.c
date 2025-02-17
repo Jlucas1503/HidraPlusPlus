@@ -16,6 +16,10 @@
 #include "lwip/pbuf.h"
 
 
+
+// LINK PARA O CANAL PUBLICO DO THINGSPEAK : https://thingspeak.mathworks.com/channels/2838418
+
+
 /*ETAPA DE VARIAVEIS GLOBAIS*/
 
 // PINOS I2C
