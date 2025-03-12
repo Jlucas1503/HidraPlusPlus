@@ -35,7 +35,7 @@ pico_sdk_init()
 
 # Add executable. Default name is the project name, version 0.1
 
-add_executable(monitor_hidratacao_IoT ssd1306.c monitor_hidratacao_IoT.c )
+add_executable(monitor_hidratacao_IoT ssd1306.c funcoes_gerais.c monitor_hidratacao_IoT.c )
 
 pico_set_program_name(monitor_hidratacao_IoT "monitor_hidratacao_IoT")
 pico_set_program_version(monitor_hidratacao_IoT "0.1")
